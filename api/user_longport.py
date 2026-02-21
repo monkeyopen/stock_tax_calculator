@@ -1,6 +1,4 @@
 from datetime import datetime
-from pickletools import floatnl
-from token import COLONEQUAL
 from longport.openapi import TradeContext, Config, OrderStatus, OpenApiException, OrderChargeDetail
 import pandas as pd
 import time
@@ -9,6 +7,7 @@ from collections import defaultdict
 import re
 from .trade_type import Stock
 from .utils import parse_option_expiry_from_symbol, safe_read_csv
+from .cost_methods import create_stock, COST_METHODS
 
 
 def get_public_attributes(obj):
@@ -41,13 +40,10 @@ def get_ctx():
 def load_longport_adr_events(cash_path):
     adr = safe_read_csv(cash_path)
 
-    # 只保留 ADR 费用
     adr = adr[adr["transaction_flow_name"] == "ADR Fee"].copy()
 
-    # 费用为正值（balance 是负数）
     adr["fee"] = adr["balance"].abs()
 
-    # 解析 symbol：优先字段，否则从 description 里抽取
     def parse_symbol(row):
         if isinstance(row["symbol"], str) and row["symbol"]:
             return row["symbol"]
@@ -56,10 +52,8 @@ def load_longport_adr_events(cash_path):
 
     adr["symbol"] = adr.apply(parse_symbol, axis=1)
 
-    # 只保留能识别 symbol 的记录
     adr = adr[adr["symbol"].notna()]
 
-    # 标准化时间 & 统一结构
     adr = adr.rename(columns={"business_time": "updated_at"})
     adr = adr[["symbol", "fee", "updated_at"]]
     adr["event_type"] = "adr"
@@ -126,14 +120,31 @@ def get_profile(csv_file_path):
 
     for _, row in reader.iterrows():
         symbol = row["symbol"].strip()
-        if symbol:  # 忽略 symbol 为空的部分
+        if symbol:
             balance = float(row["balance"])
             profit[symbol] += balance
 
     return dict(profit)
 
 
-def format_longport_trade(data_path, cash_path=None):
+def format_longport_trade(data_path, cash_path=None, cost_method="AVERAGE"):
+    """
+    格式化长桥交易数据并计算已实现收益
+    
+    Args:
+        data_path: 交易数据文件路径
+        cash_path: 现金流水文件路径
+        cost_method: 成本核算方法，可选值:
+            - AVERAGE: 移动加权平均法（默认）
+            - FIFO: 先进先出法
+            - LIFO: 后进先出法
+            - SPECIFIC: 个别计价法
+            - HIFO: 最高成本优先法
+            - LOFO: 最低成本优先法
+    
+    Returns:
+        dict: {symbol: Stock对象}
+    """
     data = safe_read_csv(data_path).sort_values(
         by='updated_at', ascending=True)
     data = data[["charge_detail_currency", "charge_detail_total_amount", "executed_price",
@@ -141,9 +152,15 @@ def format_longport_trade(data_path, cash_path=None):
     pool = {}
 
     contract_multiplier = {
-        "HKD": 500,  # 港股期权：500股/张
-        "USD": 100,   # 美股期权：100股/张
+        "HKD": 500,
+        "USD": 100,
     }
+
+    def create_stock_instance(symbol, currency):
+        if cost_method.upper() == "AVERAGE":
+            return Stock(symbol, currency)
+        else:
+            return create_stock(symbol, currency, cost_method)
 
     for _, row in data.iterrows():
         symbol = row["symbol"]
@@ -151,7 +168,7 @@ def format_longport_trade(data_path, cash_path=None):
         shares = 1 if not is_option else contract_multiplier[row["charge_detail_currency"]]
 
         if symbol not in pool:
-            pool[symbol] = Stock(symbol, row["charge_detail_currency"])
+            pool[symbol] = create_stock_instance(symbol, row["charge_detail_currency"])
         if row["side"] == "OrderSide.Sell":
             pool[symbol].sell(row["price"], row["quantity"],
                               row["charge_detail_total_amount"], row["updated_at"], shares)
@@ -165,5 +182,7 @@ def format_longport_trade(data_path, cash_path=None):
         print(adr_data)
         for _, row in adr_data.iterrows():
             symbol = row["symbol"]
+            if symbol not in pool:
+                pool[symbol] = create_stock_instance(symbol, "USD")
             pool[symbol].add_fee(row["fee"], row["updated_at"])
     return pool

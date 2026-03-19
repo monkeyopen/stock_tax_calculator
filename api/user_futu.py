@@ -22,6 +22,8 @@ def remove_repeated_fee(df):
 
 
 def get_cash_flow(output_path, start_date, end_date):
+    from pathlib import Path
+    Path(output_path).parent.mkdir(exist_ok=True, parents=True)
     trd_ctx = OpenSecTradeContext(filter_trdmarket=TrdMarket.NONE, host='127.0.0.1',
                                   port=11111, security_firm=SecurityFirm.FUTUSECURITIES)
 
@@ -33,18 +35,25 @@ def get_cash_flow(output_path, start_date, end_date):
             print(f'获取账户列表失败: {acc_list_df}')
             exit(1)
 
+        # 过滤有效账户：排除模拟账户和现金账户，排除无效acc_id
+        valid_accounts = acc_list_df[
+            (acc_list_df.get("trd_env") != TrdEnv.SIMULATE) &
+            (acc_list_df.get("acc_type") != TrdAccType.CASH) &
+            (acc_list_df['acc_id'].notna())
+        ].copy()
+
+        if valid_accounts.empty:
+            print("未找到有效账户（已排除模拟账户和现金账户）")
+            return
+
         date_list = []
         d = start_date
         while d <= end_date:
             date_list.append(d.strftime('%Y-%m-%d'))
             d += timedelta(days=1)
 
-        for _, acc_row in acc_list_df.iterrows():
+        for _, acc_row in valid_accounts.iterrows():
             acc_id = acc_row.get('acc_id')
-            if acc_row.get('trd_env') == TrdEnv.SIMULATE:
-                continue
-            if acc_id is None:
-                continue
             try:
                 acc_id = int(acc_id)
             except Exception:
@@ -95,6 +104,8 @@ def extract_other_fees(path):
 
 
 def get_trade_flow(output_path, start_date, end_date):
+    from pathlib import Path
+    Path(output_path).parent.mkdir(exist_ok=True, parents=True)
     quote_ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
     trade_ctx = OpenSecTradeContext(
         host='127.0.0.1', port=11111, filter_trdmarket=TrdMarket.NONE)
@@ -109,12 +120,19 @@ def get_trade_flow(output_path, start_date, end_date):
             print(f'获取账户列表失败: {acc_list_df}')
             return
 
-        for _, acc_row in acc_list_df.iterrows():
+        # 过滤有效账户：排除模拟账户和现金账户，排除无效acc_id
+        valid_accounts = acc_list_df[
+            (acc_list_df.get("trd_env") != TrdEnv.SIMULATE) &
+            (acc_list_df.get("acc_type") != TrdAccType.CASH) &
+            (acc_list_df['acc_id'].notna())
+        ].copy()
+
+        if valid_accounts.empty:
+            print("未找到有效账户（已排除模拟账户和现金账户）")
+            return
+
+        for _, acc_row in valid_accounts.iterrows():
             acc_id = acc_row.get('acc_id')
-            if acc_row.get("trd_env") == TrdEnv.SIMULATE:
-                continue
-            if acc_id is None:
-                continue
 
             try:
                 acc_id = int(acc_id)
